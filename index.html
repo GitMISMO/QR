@@ -162,6 +162,8 @@ body.bare .hqtop, body.bare.railmini .hqtop{margin-left:0;width:100%}
 .publishbar{display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;background:var(--surface);border:1px solid var(--warn);border-left:4px solid var(--warn);border-radius:6px;padding:12px 16px;margin:0 0 20px;font-size:13px;color:var(--ink-2)}
 .publishbar .pb-t{flex:1 1 320px;min-width:0}
 .publishbar b{color:var(--warn)}
+.delp{margin:0 0 10px;font-size:13px;color:var(--ink-2)}
+.viewonly #c-delblk{display:none!important}
 .publishbar .why{display:block;margin-top:4px;font-size:12px;color:var(--ink-3)}
 .viewonly [data-go="new"],.viewonly .hq nav button[data-hq="new"],.viewonly #panel-body .pblk:has(#c-off),.viewonly #panel-body .pblk:has(#c-on),.viewonly #c-save,.viewonly .quick{display:none!important}
 .foot{margin-top:40px;padding-top:12px;border-top:1px solid var(--rule);font-size:11.5px;color:var(--ink-3)}
@@ -682,6 +684,7 @@ const Preview={
   async listCodes(){ return this.data.codes; },
   async listScans(){ return this.data.scans; },
   async createCode(c){ this.data.codes.unshift(c); this.save(); return c; },
+  async deleteCode(id){ this.data.codes=this.data.codes.filter(x=>x.id!==id); this.save(); },
   async updateCode(id,patch,entries){ const c=this.data.codes.find(x=>x.id===id); if(!c) throw new Error('That code no longer exists.');
     Object.assign(c,patch); (entries||[]).forEach(e=>c.history.push(e)); this.save(); return c; },
   async resolve(id){
@@ -774,14 +777,17 @@ const Site={
     return {codes:out};
   },
   /* The public file phones read. Written whole from the records, as one commit. */
-  async publishRoutes(){
+  routesText:null,
+  async publishRoutes(force){
     const text=JSON.stringify(this.routesFrom(this.codes),null,1)+'\n';
+    /* nothing phones read has changed (a note, the purpose): no commit */
+    if(!force && text===this.routesText && this.routes.ok) return true;
     this.routes.busy=true;
     try{
       for(let t=0;t<4;t++){
         try{
           await relayCall('POST',CONFIG.routesProject+'/commit',{files:[{path:'data/routes.json',content:text}],message:'Update the QR scan list'});
-          this.routes={ok:true,msg:'',busy:false}; return true;
+          this.routesText=text; this.routes={ok:true,msg:'',busy:false}; return true;
         }catch(e){ if(e.status!==409 || t===3) throw e; await sleep(400*(t+1)); }
       }
     }catch(e){ this.routes={ok:false,msg:e.message||'',busy:false}; return false; }
@@ -790,14 +796,19 @@ const Site={
   /* On load: is the public scan list the same as the records? If not, fix it (editors) or
      say so (view-only). */
   async checkRoutes(){
-    let have=null;
-    try{
+    let have=null, fromRepo=false;
+    /* the copy in the repository itself: the website's copy lags a save by a minute or more */
+    try{ const b=await relayCall('GET',CONFIG.routesProject+'/data/routes'); have=(b&&b.data&&b.data.codes)||{}; fromRepo=true; }catch(e){}
+    if(!fromRepo) try{
       const u=new URL('data/routes.json',scanBase()); u.searchParams.set('t',Date.now());
       const r=await fetch(u.href,{cache:'no-store'});
       if(r.ok){ const j=await r.json(); have=j&&j.codes||{}; }
     }catch(e){}
     const want=this.routesFrom(this.codes).codes;
-    if(have && JSON.stringify(sortKeys(have))===JSON.stringify(sortKeys(want))){ this.routes={ok:true,msg:'',busy:false}; return; }
+    if(have && JSON.stringify(sortKeys(have))===JSON.stringify(sortKeys(want))){
+      this.routesText=JSON.stringify(this.routesFrom(this.codes),null,1)+'\n';
+      this.routes={ok:true,msg:'',busy:false}; return; }
+    if(fromRepo) this.lastRoutesAt=0;
     /* GitHub takes about a minute to put a new file on the website, so a save made in the last
        two minutes is not treated as missing */
     if(this.lastRoutesAt && Date.now()-this.lastRoutesAt<120000) return;
@@ -850,6 +861,7 @@ const Site={
   async listCodes(){ return Object.values(this.codes).map(c=>Object.assign({history:[]},c)); },
   async listScans(){ return this.scans; },
   async createCode(c){ await this.change(docs=>{ docs[c.id]=clone(c); }); return c; },
+  async deleteCode(id){ await this.change(docs=>{ delete docs[id]; }); },
   async updateCode(id,patch,entries){
     if(!this.codes[id]) throw new Error('That code is no longer on record.');
     await this.change(docs=>{ const c=docs[id]; if(!c) throw new Error('That code is no longer on record.');
@@ -1208,6 +1220,12 @@ function codePanel(id){
     (sc.length?'<div class="grid2"><div class="box"><h3>By Device</h3>'+barsHtml(tally(sc,'device',DEVICES),sc.length)+'</div><div class="box"><h3>By Time Zone Region</h3>'+barsHtml(tally(sc,'region',REGIONS),sc.length)+'</div></div>'+
       '<div class="tbl" style="margin-top:14px"><table><thead><tr><th>When</th><th>Device</th><th>Region</th><th>What They Saw</th></tr></thead><tbody>'+recent+'</tbody></table></div>':'<div class="hqrows"><div class="empty">No scans yet.</div></div>')+'</div>'+
   '<div class="pblk"><h3>History</h3><ul class="hist">'+c.history.slice().sort((a,b)=>b.at-a.at).map(h=>'<li><span class="hw">'+esc(fmtDT(h.at))+' · '+esc(h.by)+'</span><span class="hx">'+esc(h.what)+'</span></li>').join('')+'</ul></div>'+
+  '<div class="pblk" id="c-delblk"><h3>Delete This Code</h3>'+
+    '<p class="delp">Removes the code and its record for good. If you only want it to stop working, use Turn Off Now instead: it keeps the history.</p>'+
+    '<div class="btnrow"><button class="btn danger small" type="button" id="c-del">Delete Code</button></div>'+
+    '<div class="confirm" id="c-delbox" hidden><p><b>Delete '+esc(id)+' for good?</b> Anyone who scans it will see the “no longer active” page with '+esc(CONFIG.fallbackSite.replace(/^https?:\/\/(www\.)?/,''))+' and '+esc(CONFIG.helpEmail)+'. '+
+      'Scans already counted stay in the scan records but won’t show under any code. This can’t be undone.</p>'+
+      '<div class="btnrow" style="margin-top:10px"><button class="btn danger small" type="button" id="c-delgo">Delete It</button><button class="btn ghost small" type="button" id="c-delno">Keep It</button></div></div></div>'+
   '<div class="savebar" id="c-save" hidden><button class="btn" type="button" id="c-savego">Save Changes</button><button class="btn ghost" type="button" id="c-undo">Undo</button><span class="sp"><b id="c-n">0</b> unsaved changes</span></div>';
 }
 const LABEL={purpose:'Purpose',forWhom:'Generated For',placeType:'Placement Type',place:'Placement Details',dest:'Destination Link',start:'Start Date',end:'End Date',notes:'Notes'};
@@ -1225,6 +1243,12 @@ function wireCode(id){
   $('#c-undo').addEventListener('click',()=>renderPanel());
   const off=$('#c-off'); if(off) off.addEventListener('click',()=>{ $('#c-offbox').hidden=false; $('#c-reason').focus(); });
   const offno=$('#c-offno'); if(offno) offno.addEventListener('click',()=>{ $('#c-offbox').hidden=true; });
+  $('#c-del').addEventListener('click',()=>{ const b=$('#c-delbox'); b.hidden=false; try{ b.scrollIntoView({block:'nearest'}); }catch(e){} });
+  $('#c-delno').addEventListener('click',()=>{ $('#c-delbox').hidden=true; });
+  $('#c-delgo').addEventListener('click',async()=>{ const g=$('#c-delgo'); g.disabled=true; g.textContent='Deleting…';
+    try{ await Data.deleteCode(id); }catch(e){ g.disabled=false; g.textContent='Delete It'; toast(e.message||'Not deleted. Try again.'); return; }
+    closePanel(); await refresh(); render();
+    toast(LIVE?(Site.routes.ok?'Deleted '+id+'. Scans show the no-longer-active page within about a minute.':'Deleted '+id+', but the scan list didn’t update. Use Try Again at the top.'):'Deleted '+id+'.'); });
   const offgo=$('#c-offgo'); if(offgo) offgo.addEventListener('click',async()=>{ const why=$('#c-reason').value.trim();
     offgo.disabled=true;
     try{ await Data.updateCode(id,{off:true,offReason:why},[{at:Date.now(),by:S.user.name,what:'Turned the code off'+(why?': '+why:'')}]); }catch(e){ offgo.disabled=false; toast(e.message||'Not turned off. Try again.'); return; }
@@ -1295,7 +1319,7 @@ $$('.hq nav button[data-hq]').forEach(b=>b.addEventListener('click',()=>go(b.get
 async function publish(kind){
   if(kind!=='routes') return;
   render();
-  const ok=await Site.publishRoutes(); if(ok) Site.lastRoutesAt=Date.now();
+  const ok=await Site.publishRoutes(true); if(ok) Site.lastRoutesAt=Date.now();
   render(); toast(ok?'The scan list is up to date. Phones follow it within about a minute.':'Still didn’t update: '+(Site.routes.msg||'try again in a moment')+'.');
 }
 /* Scan counts come from the "QR Scans" workbook the Power Automate scan log fills.
