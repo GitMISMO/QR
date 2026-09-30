@@ -162,6 +162,8 @@ body.bare .hqtop, body.bare.railmini .hqtop{margin-left:0;width:100%}
 .publishbar{display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;background:var(--surface);border:1px solid var(--warn);border-left:4px solid var(--warn);border-radius:6px;padding:12px 16px;margin:0 0 20px;font-size:13px;color:var(--ink-2)}
 .publishbar .pb-t{flex:1 1 320px;min-width:0}
 .publishbar b{color:var(--warn)}
+.publishbar .why{display:block;margin-top:4px;font-size:12px;color:var(--ink-3)}
+.viewonly [data-go="new"],.viewonly .hq nav button[data-hq="new"],.viewonly #panel-body .pblk:has(#c-off),.viewonly #panel-body .pblk:has(#c-on),.viewonly #c-save,.viewonly .quick{display:none!important}
 .foot{margin-top:40px;padding-top:12px;border-top:1px solid var(--rule);font-size:11.5px;color:var(--ink-3)}
 
 /* the navy headline */
@@ -536,18 +538,23 @@ var qrcode=function(){var t=function(t,r){var e=t,n=g[r],o=null,i=0,a=null,u=[],
    ─────────────────────────────────────────────
    The page lives in the public repo GitMISMO/qr and is served at resources.mismo.org/qr/.
    Staff sign in with the shared resources.mismo.org sign-in (/assets/session.js).
-   Every code is kept in one file, data/codes.json, in that same repo.
-     • The page reads data/codes.json from the website.
-     • Changes are held in this browser until someone downloads the updated file and
-       uploads it to data/ on GitHub. Before downloading, the page re-reads the live file
-       and lays this browser's changes on top, so nobody else's codes are dropped.
-     • A scan (?c=CODE) never signs in. It reads data/codes.json, sends the person on,
-       and (once CONFIG.scanLogUrl is set) notes the scan to the Power Automate scan log.
+     • The full code records live in the PRIVATE repo GitMISMO/qr-data, data/codes.json
+       ({docs:{id:{…}}}), read and saved through MISMO's save relay (project "qr"). Every save
+       sends the file's sha; if someone saved first (409) the page re-reads and re-applies.
+     • After every save the page rewrites data/routes.json in THIS public repo (project
+       "qr-routes"): {codes:{id:{d:link, s:start, e:end, x:1 if off}}}, only what a phone
+       needs. If that fails a bar says so; each load also checks it and brings it up to date.
+     • A scan (?c=CODE) never signs in. It reads data/routes.json, sends the person on, and
+       (once CONFIG.scanLogUrl is set) notes the scan to the Power Automate scan log.
+     • Scan counts come from qr-data data/scans-YYYY-MM.json, written only by the flow.
    Storage keys are namespaced resources:qr:… and localStorage.clear() is never used. */
 const CONFIG = {
   // The address printed inside every code. Once codes are printed this must never change.
   scanBase: "https://resources.mismo.org/qr/",
-  uploadPage: "https://github.com/GitMISMO/qr/upload/main/data",
+  // MISMO's save relay (the same one Summit HQ uses) and this tool's two project keys.
+  relayUrl: "https://rgvdi67cg27o5kcmiytcqbqnrm0hmztx.lambda-url.us-east-1.on.aws",
+  codesProject: "qr",
+  routesProject: "qr-routes",
   toolName: "the QR Code Manager",
   // The Power Automate "QR Scan Log" flow's HTTP address, and the word it checks for.
   // Public by design, like the prospectus intake: the worst misuse is a junk scan row.
@@ -688,39 +695,180 @@ const Preview={
   reset(){ store.del(DEMO_KEY); this.load(); }
 };
 
-/* ── the live site: data/codes.json, plus this browser's changes not uploaded yet ── */
+/* ── the live site: records in qr-data through the relay, the public scan list in qr ── */
 const clone=o=>JSON.parse(JSON.stringify(o));
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+function relayError(code,message,status){ const e=new Error(message); e.code=code; e.status=status||0; return e; }
+function relayMessage(j,status,method){
+  const c=j&&j.error;
+  if(c==='CONFLICT') return 'Someone else saved at the same moment.';
+  if(c==='VIEW_ONLY') return 'Your account can view the QR codes but can’t change them.';
+  if(c==='NO_ACCESS') return method==='GET'?'Your account doesn’t have access to the QR codes.':'Your account can view the QR codes but can’t change them.';
+  if(c==='UNKNOWN_PROJECT') return 'MISMO’s save service doesn’t know this tool yet.';
+  if(c==='PATH_NOT_WRITABLE') return 'MISMO’s save service won’t let this tool write that file.';
+  if(c==='TOKEN'||c==='GITHUB') return 'MISMO’s save service couldn’t reach GitHub'+(j.message?' ('+j.message+')':'')+'. If this tool is new, its repositories may still need to be added to the relay’s GitHub token.';
+  if(c==='CORRUPT') return 'The saved codes file isn’t readable.';
+  if(c==='TOO_LARGE') return 'That’s too much to save in one go.';
+  return (j&&j.message)||('The save service answered '+status+'.');
+}
+/* One door to the relay. A signed-out save opens "Sign in to finish saving" and then goes
+   through; nothing is ever dropped quietly. */
+async function relayCall(method,path,body,again){
+  const RS=window.ResourcesSession;
+  if(!RS) throw relayError('NO_SIGNIN','The sign-in didn’t load. Reload the page.');
+  if(!RS.token()){
+    try{ await RS.signIn({reason:'expired'}); }catch(e){}
+    if(!RS.token()) throw relayError('SIGNED_OUT', method==='GET'?'You’re signed out. Sign in to see the codes.':'You’re signed out, so this change was not saved.');
+  }
+  let r;
+  try{
+    r=await fetch(CONFIG.relayUrl+'/'+path,{method,cache:'no-store',
+      headers:Object.assign({Authorization:'Bearer '+RS.token()},body?{'Content-Type':'application/json'}:{}),
+      body:body?JSON.stringify(body):undefined});
+  }catch(e){ throw relayError('OFFLINE','Couldn’t reach MISMO’s save service. Check your connection and try again.'); }
+  const j=await r.json().catch(()=>({}));
+  if(r.ok) return j;
+  if(r.status===401 && !again){
+    try{ await RS.signIn({reason:'expired'}); }catch(e){}
+    if(RS.token()) return relayCall(method,path,body,true);
+    throw relayError('SIGNED_OUT', method==='GET'?'You’re signed out. Sign in to see the codes.':'You’re signed out, so this change was not saved.');
+  }
+  if(r.status===403 && j.error==='NO_ACCESS' && method==='GET'){
+    try{ RS.signIn({reason:'no-access',toolName:CONFIG.toolName,gated:true}); }catch(e){}
+  }
+  throw relayError(j.error||('HTTP_'+r.status), relayMessage(j,r.status,method), r.status);
+}
+const sortKeys=o=>{ if(!o||typeof o!=='object'||Array.isArray(o)) return o; const out={}; Object.keys(o).sort().forEach(k=>out[k]=sortKeys(o[k])); return out; };
+
 const Site={
-  published:{}, pending:{},
-  async fetchPublished(){
-    const u=new URL('data/codes.json',scanBase()); u.searchParams.set('t',Date.now());
-    const r=await fetch(u.href,{cache:'no-store'});
-    if(r.status===404) return {};
-    if(!r.ok) throw new Error('The codes file didn’t load ('+r.status+').');
-    const j=await r.json(); return (j&&j.codes&&typeof j.codes==='object')?j.codes:{};
+  codes:{}, sha:null, scans:[], moved:0,
+  routes:{ok:true,msg:'',busy:false},
+  async readCodes(){
+    const b=await relayCall('GET',CONFIG.codesProject+'/data/codes');
+    const d=b&&b.data; this.sha=(b&&b.sha)||null;
+    return (d&&d.docs&&typeof d.docs==='object')?d.docs:{};
   },
-  readPending(){ try{ this.pending=JSON.parse(store.get(PENDING_KEY)||'{}')||{}; }catch(e){ this.pending={}; } },
-  writePending(){ store.set(PENDING_KEY,JSON.stringify(this.pending)); },
-  /* Drop any change that is now in the live file, so the bar clears by itself after an upload. */
-  settle(){ Object.keys(this.pending).forEach(id=>{ if(JSON.stringify(this.published[id])===JSON.stringify(this.pending[id])) delete this.pending[id]; }); this.writePending(); },
-  async load(){ this.published=await this.fetchPublished(); this.readPending(); this.settle(); },
-  merged(){ return Object.assign({},this.published,this.pending); },
-  pendingCount(){ return Object.keys(this.pending).length; },
-  async listCodes(){ return Object.values(this.merged()).map(c=>Object.assign({history:[]},c)); },
-  async listScans(){ try{ return JSON.parse(store.get(SCANS_KEY)||'[]')||[]; }catch(e){ return []; } },
-  async createCode(c){ this.pending[c.id]=clone(c); this.writePending(); return c; },
+  /* Save a change: apply it to the latest records, send it with the sha, and if someone
+     saved first, read theirs and apply it again on top. Then refresh the public scan list. */
+  async change(apply){
+    let last=null;
+    for(let t=0;t<6;t++){
+      const next=clone(this.codes); apply(next);
+      try{
+        const b=await relayCall('PUT',CONFIG.codesProject+'/data/codes',{content:{docs:next},sha:this.sha});
+        this.sha=(b&&b.sha)||this.sha; this.codes=next; last=null; break;
+      }catch(e){
+        last=e;
+        if(e.status!==409) throw e;
+        await sleep(300*(t+1)+Math.random()*400);
+        this.codes=await this.readCodes();
+      }
+    }
+    if(last) throw relayError('CONFLICT','Others kept saving at the same moment, so this change was not saved. Try again.',409);
+    await this.publishRoutes();
+  },
+  routesFrom(docs){
+    const out={};
+    Object.keys(docs).sort().forEach(id=>{ const c=docs[id]; if(!c||!c.dest) return;
+      const r={d:c.dest}; if(c.start) r.s=c.start; if(c.end) r.e=c.end; if(c.off) r.x=1; out[id]=r; });
+    return {codes:out};
+  },
+  /* The public file phones read. Written whole from the records, as one commit. */
+  async publishRoutes(){
+    const text=JSON.stringify(this.routesFrom(this.codes),null,1)+'\n';
+    this.routes.busy=true;
+    try{
+      for(let t=0;t<4;t++){
+        try{
+          await relayCall('POST',CONFIG.routesProject+'/commit',{files:[{path:'data/routes.json',content:text}],message:'Update the QR scan list'});
+          this.routes={ok:true,msg:'',busy:false}; return true;
+        }catch(e){ if(e.status!==409 || t===3) throw e; await sleep(400*(t+1)); }
+      }
+    }catch(e){ this.routes={ok:false,msg:e.message||'',busy:false}; return false; }
+    return false;
+  },
+  /* On load: is the public scan list the same as the records? If not, fix it (editors) or
+     say so (view-only). */
+  async checkRoutes(){
+    let have=null;
+    try{
+      const u=new URL('data/routes.json',scanBase()); u.searchParams.set('t',Date.now());
+      const r=await fetch(u.href,{cache:'no-store'});
+      if(r.ok){ const j=await r.json(); have=j&&j.codes||{}; }
+    }catch(e){}
+    const want=this.routesFrom(this.codes).codes;
+    if(have && JSON.stringify(sortKeys(have))===JSON.stringify(sortKeys(want))){ this.routes={ok:true,msg:'',busy:false}; return; }
+    /* GitHub takes about a minute to put a new file on the website, so a save made in the last
+       two minutes is not treated as missing */
+    if(this.lastRoutesAt && Date.now()-this.lastRoutesAt<120000) return;
+    if(S.canEdit){ const ok=await this.publishRoutes(); if(ok) this.lastRoutesAt=Date.now(); }
+    else this.routes={ok:false,msg:'The public scan list is behind the saved codes. Ask someone who can edit to open this page.',busy:false};
+  },
+  /* First run: codes in the old public codes.json, or held in this browser for upload, move
+     into the private records. */
+  async moveOldCodes(){
+    if(!S.canEdit) return 0;
+    let old={};
+    try{
+      const u=new URL('data/codes.json',scanBase()); u.searchParams.set('t',Date.now());
+      const r=await fetch(u.href,{cache:'no-store'});
+      if(r.ok){ const j=await r.json(); if(j&&j.codes&&typeof j.codes==='object') old=j.codes; }
+    }catch(e){}
+    let held={}; try{ held=JSON.parse(store.get(PENDING_KEY)||'{}')||{}; }catch(e){}
+    const add={};
+    Object.keys(old).forEach(id=>{ if(!this.codes[id]) add[id]=old[id]; });
+    Object.keys(held).forEach(id=>{ const h=held[id]; if(h && (!this.codes[id] || (h.history||[]).length>(this.codes[id].history||[]).length)) add[id]=h; });
+    const n=Object.keys(add).length;
+    if(!n){ store.del(PENDING_KEY); return 0; }
+    await this.change(docs=>{ Object.keys(add).forEach(id=>{ docs[id]=clone(add[id]); }); });
+    store.del(PENDING_KEY);
+    return n;
+  },
+  /* Scan counts: one file a month, written by the scan-log flow. */
+  async readScans(){
+    let first=Date.now();
+    Object.values(this.codes).forEach(c=>{ if(c&&c.created&&c.created<first) first=c.created; });
+    const months=[], d=new Date(); d.setDate(1);
+    const stop=new Date(first); stop.setDate(1); stop.setHours(0,0,0,0);
+    while(d>=stop && months.length<24){ months.push(d.getFullYear()+'-'+pad(d.getMonth()+1)); d.setMonth(d.getMonth()-1); }
+    const got=await Promise.all(months.map(m=>relayCall('GET',CONFIG.codesProject+'/data/scans-'+m).catch(()=>null)));
+    const out=[];
+    got.forEach(b=>{ const L=b&&b.data&&Array.isArray(b.data.list)?b.data.list:[];
+      L.forEach(s=>{ if(!s||!s.code) return; const at=typeof s.at==='number'?s.at:Date.parse(s.at); if(!isFinite(at)) return;
+        out.push({code:String(s.code).toUpperCase(),at,device:s.device||'Other',region:s.region||'Unknown',outcome:s.outcome||'sent'}); }); });
+    out.sort((a,b)=>b.at-a.at);
+    return out;
+  },
+  async load(){
+    this.codes=await this.readCodes();
+    try{ this.moved=await this.moveOldCodes(); }catch(e){ this.moved=0; toast('Couldn’t move the older codes across: '+(e.message||'')); }
+    try{ this.scans=await this.readScans(); }catch(e){ this.scans=[]; }
+    await this.checkRoutes();
+  },
+  async reload(){ const before=JSON.stringify(this.codes); this.codes=await this.readCodes(); return before!==JSON.stringify(this.codes); },
+  pendingCount(){ return 0; },
+  async listCodes(){ return Object.values(this.codes).map(c=>Object.assign({history:[]},c)); },
+  async listScans(){ return this.scans; },
+  async createCode(c){ await this.change(docs=>{ docs[c.id]=clone(c); }); return c; },
   async updateCode(id,patch,entries){
-    const cur=this.merged()[id]; if(!cur) throw new Error('That code is no longer on record.');
-    const c=clone(cur); Object.assign(c,patch); c.history=(c.history||[]).concat(entries||[]);
-    this.pending[id]=c; this.writePending(); return c;
-  },
-  async buildFile(){ const latest=await this.fetchPublished(); return {updated:new Date().toISOString(),codes:Object.assign({},latest,this.pending)}; }
+    if(!this.codes[id]) throw new Error('That code is no longer on record.');
+    await this.change(docs=>{ const c=docs[id]; if(!c) throw new Error('That code is no longer on record.');
+      Object.assign(c,patch); c.history=(c.history||[]).concat(entries||[]); });
+    return this.codes[id];
+  }
 };
 const Data = LIVE ? Site : Preview;
 
 /* ── a scan on the real site ── */
 async function liveResolve(id){
-  const codes=await Site.fetchPublished(), c=codes[id];
+  /* the public scan list: only the link, the dates and whether it is off */
+  const get=async name=>{ const u=new URL('data/'+name,scanBase()); u.searchParams.set('t',Date.now());
+    const r=await fetch(u.href,{cache:'no-store'}); if(r.status===404) return null;
+    if(!r.ok) throw new Error('The scan list didn’t load ('+r.status+').'); return r.json(); };
+  let c=null;
+  const routes=await get('routes.json');
+  if(routes){ const x=routes.codes&&routes.codes[id]; if(x) c={dest:x.d,start:x.s||'',end:x.e||'',off:!!x.x}; }
+  else { const old=await get('codes.json'); c=old&&old.codes&&old.codes[id]||null; }   /* before the first save */
   if(!c) return {state:'missing'};
   const s=statusOf(c);
   return {state:s,dest:isLive(s)?c.dest:null,start:c.start};
@@ -815,7 +963,7 @@ async function copyText(text,btn){
 /* ════════════════════════════════════════════════════════════════
    The tool
    ════════════════════════════════════════════════════════════════ */
-const S={ user:null, codes:[], scans:[], view:'overview', filter:'all', text:'', period:30, draft:null, justMade:null };
+const S={ user:null, canEdit:true, codes:[], scans:[], view:'overview', filter:'all', text:'', period:30, draft:null, justMade:null };
 const codeById=id=>S.codes.find(c=>c.id===id);
 const scansFor=id=>S.scans.filter(s=>s.code===id);
 function since(days){ return days?Date.now()-days*DAY:0; }
@@ -843,12 +991,12 @@ function codeRow(c,extra){
 function rowsHtml(list,extraFn){ return list.length?'<div class="hqrows">'+list.map(c=>codeRow(c,extraFn?extraFn(c):null)).join('')+'</div>':'<div class="hqrows"><div class="empty">No codes here.</div></div>'; }
 const previewBar=()=>{
   if(PREVIEW) return '<div class="previewbar"><div><b>Preview Mode.</b> These are sample codes kept in this browser only. Nothing made here is live.</div></div>';
-  const n=Site.pendingCount(); if(!n) return '';
-  return '<div class="publishbar"><div class="pb-t"><b>'+plural(n,'change')+' not live yet.</b> Download the codes file, then upload it to GitHub. '+
-    'Changes go live about a minute after you upload.</div><div class="btnrow">'+
-    '<button class="btn small" type="button" data-publish="dl">1. Download Codes File</button>'+
-    '<a class="btn ghost small" href="'+esc(CONFIG.uploadPage)+'" target="_blank" rel="noopener">2. Upload It to GitHub</a>'+
-    '<button class="btn ghost small" type="button" data-publish="check">3. Check It’s Live</button></div></div>';
+  let bar='';
+  if(!S.canEdit) bar+='<div class="note info"><b>View only.</b> Your account can see every code and its scans but can’t make or change codes.</div>';
+  if(Site.routes.ok) return bar;
+  return bar+'<div class="publishbar"><div class="pb-t"><b>The codes are saved, but the scan list phones read didn’t update.</b> '+
+    'Until it does, scanning may follow the old link or dates.'+(Site.routes.msg?' <span class="why">'+esc(Site.routes.msg)+'</span>':'')+'</div>'+
+    (S.canEdit?'<div class="btnrow"><button class="btn small" type="button" data-publish="routes"'+(Site.routes.busy?' disabled':'')+'>Try Again</button></div>':'')+'</div>';
 };
 const foot=()=>'<div class="foot">Build '+esc(CONFIG.build)+(PREVIEW?' · Preview Mode':'')+' · Codes point to '+esc(scanBase())+'</div>';
 
@@ -925,6 +1073,7 @@ function vCodes(){
 /* ── New Code ── */
 function blankDraft(){ const T=today(); return {purpose:'',forWhom:'',placeType:'',place:'',dest:'',start:T,end:addMonths(T,3),notes:''}; }
 function vNew(){
+  if(!S.canEdit) return '<div class="vhead"><div class="grow"><h1>New Code</h1></div></div>'+previewBar()+foot();
   const d=S.draft||(S.draft=blankDraft());
   const opt=PLACE_TYPES.map(p=>'<option'+(d.placeType===p?' selected':'')+'>'+esc(p)+'</option>').join('');
   const fld=(id,label,inner,hint,wide)=>'<div class="f'+(wide?' wide':'')+'" data-f="'+id+'"><label for="n-'+id+'">'+label+'<span class="req">*</span></label>'+inner+(hint?'<span class="hint">'+hint+'</span>':'')+'<span class="err" hidden></span></div>';
@@ -975,7 +1124,8 @@ async function createFromForm(){
   const now=Date.now();
   const c={id:newId(),purpose:d.purpose,forWhom:d.forWhom,by:S.user.name,byEmail:S.user.email,placeType:d.placeType,place:d.place,dest:d.dest,start:d.start,end:d.end,notes:d.notes,off:false,offReason:'',created:now,
     history:[{at:now,by:S.user.name,what:d.from?'Created the code (copied from '+d.from+')':'Created the code'}]};
-  try{ await Data.createCode(c); }catch(e){ toast(e.message||'The code wasn’t saved. Try again.'); return; }
+  const sb=$('#newform button[type=submit]'); if(sb){ sb.disabled=true; sb.textContent='Saving…'; }
+  try{ await Data.createCode(c); }catch(e){ if(sb){ sb.disabled=false; sb.textContent='Create QR Code'; } toast(e.message||'The code wasn’t saved. Try again.'); return; }
   S.draft=null; S.justMade=c.id; await refresh(); go('codes'); openCode(c.id);
 }
 
@@ -989,7 +1139,7 @@ function vScans(){
   const rows=list.slice(0,25).map(s=>{ const k=c(s.code); return '<tr class="clk" data-open="'+esc(s.code)+'"><td class="nw">'+esc(fmtDT(s.at))+'</td><td>'+esc(k.purpose||s.code)+'</td><td>'+esc(k.place||'')+'</td><td class="nw">'+esc(s.device)+'</td><td class="nw">'+esc(s.region)+'</td><td class="nw">'+
     (s.outcome==='sent'?'Sent to link':s.outcome==='early'?'Not started page':'No longer active page')+'</td></tr>'; }).join('');
   return '<div class="vhead"><div class="grow"><h1>Scan Activity</h1><p>'+plural(tot,'scan')+' in '+lab+', from '+plural(codesHit,'code')+'.</p></div><div class="seg" role="group" aria-label="Period">'+seg+'</div></div>'+previewBar()+
-  (LIVE?'<div class="note info"><b>Scan counts come from the QR Scans workbook.</b> Download it as a CSV and load it here to update these numbers. <button class="btn ghost small" type="button" data-scanfile="1" style="margin-left:8px">Load Scans File</button><input type="file" id="scanfile" accept=".csv,text/csv" hidden></div>':'')+'<div class="stats"><div class="stat"><span class="lab">Total Scans</span><span class="val">'+num(tot)+'</span><span class="sub">'+esc(lab.charAt(0).toUpperCase()+lab.slice(1))+'</span></div>'+
+  (LIVE?'<div class="note info">'+(CONFIG.scanLogUrl?'<b>Scans are counted automatically.</b> New scans show up here within about 15 minutes.':'<b>Scan counting isn’t switched on yet.</b> Scans will show up here once the QR Scan Log flow is connected.')+'</div>':'')+'<div class="stats"><div class="stat"><span class="lab">Total Scans</span><span class="val">'+num(tot)+'</span><span class="sub">'+esc(lab.charAt(0).toUpperCase()+lab.slice(1))+'</span></div>'+
     '<div class="stat"><span class="lab">Sent to Their Link</span><span class="val">'+num(sent)+'</span><span class="sub">'+pct(sent,tot)+'% of scans</span></div>'+
     '<div class="stat'+(dead?' warn':'')+'"><span class="lab">Reached an Ended Code</span><span class="val">'+num(dead)+'</span><span class="sub">Saw the no-longer-active page</span></div>'+
     '<div class="stat"><span class="lab">Codes Scanned</span><span class="val">'+num(codesHit)+'</span><span class="sub">of '+num(S.codes.length)+' on record</span></div></div>'+
@@ -1014,6 +1164,7 @@ function vScanner(){
 /* ── one code, in the panel ── */
 function openCode(id){ openPanel(()=>{ const c=codeById(id); return c?c.purpose:'Code'; }, ()=>codePanel(id), ()=>wireCode(id)); }
 function codePanel(id){
+  if(!S.canEdit) setTimeout(()=>$$('#panel-body [data-k]').forEach(el=>{ el.disabled=true; }),0);
   const c=codeById(id); if(!c) return '<div class="empty">That code is no longer on record.</div>';
   const T=today(), s=statusOf(c,T), sc=scansFor(id), s30=sc.filter(x=>x.at>=since(30)), url=scanUrl(id);
   let sd='';
@@ -1027,7 +1178,7 @@ function codePanel(id){
   const ro=(label,val)=>'<div class="f"><span class="lab">'+label+'</span><span class="v">'+esc(val)+'</span></div>';
   const last=sc[0];
   const recent=sc.slice(0,12).map(x=>'<tr><td class="nw">'+esc(fmtDT(x.at))+'</td><td class="nw">'+esc(x.device)+'</td><td class="nw">'+esc(x.region)+'</td><td class="nw">'+(x.outcome==='sent'?'Sent to link':x.outcome==='early'?'Not started page':'No longer active page')+'</td></tr>').join('');
-  return (S.justMade===id?(LIVE?'<div class="note ok"><b>Your code is made.</b> It starts working once you upload the codes file. Use the bar at the top of the page.</div>':'<div class="note ok"><b>Your code is ready.</b> Download it below and place it. Every scan will show up here.</div>'):'')+
+  return (S.justMade===id?(LIVE?'<div class="note ok"><b>Your code is made and saved.</b> Scanning it works within about a minute. Download it below and place it.</div>':'<div class="note ok"><b>Your code is ready.</b> Download it below and place it. Every scan will show up here.</div>'):'')+
   '<div class="codehead"><div class="qrbox">'+qrSvg(url)+'<span class="cid">'+esc(id)+'</span>'+(PREVIEW?'<span class="sample">Sample · Not Live</span>':'')+'</div>'+
   '<div style="min-width:0;display:flex;flex-direction:column;gap:12px">'+
     '<div class="tstate '+s+'">'+chip(s)+'<span class="sd">'+sd+'</span></div>'+
@@ -1075,8 +1226,12 @@ function wireCode(id){
   const off=$('#c-off'); if(off) off.addEventListener('click',()=>{ $('#c-offbox').hidden=false; $('#c-reason').focus(); });
   const offno=$('#c-offno'); if(offno) offno.addEventListener('click',()=>{ $('#c-offbox').hidden=true; });
   const offgo=$('#c-offgo'); if(offgo) offgo.addEventListener('click',async()=>{ const why=$('#c-reason').value.trim();
-    await Data.updateCode(id,{off:true,offReason:why},[{at:Date.now(),by:S.user.name,what:'Turned the code off'+(why?': '+why:'')}]); S.justMade=null; await refresh(); renderPanel(); toast(LIVE?'Turned off here. Upload the codes file to make it take effect.':'Turned off. Scans now show the no-longer-active page.'); });
-  const on=$('#c-on'); if(on) on.addEventListener('click',async()=>{ await Data.updateCode(id,{off:false,offReason:''},[{at:Date.now(),by:S.user.name,what:'Turned the code back on'}]); S.justMade=null; await refresh(); renderPanel();
+    offgo.disabled=true;
+    try{ await Data.updateCode(id,{off:true,offReason:why},[{at:Date.now(),by:S.user.name,what:'Turned the code off'+(why?': '+why:'')}]); }catch(e){ offgo.disabled=false; toast(e.message||'Not turned off. Try again.'); return; }
+    S.justMade=null; await refresh(); renderPanel(); toast(LIVE?(Site.routes.ok?'Turned off. Scans show the no-longer-active page within about a minute.':'Turned off and saved, but the scan list didn’t update. Use Try Again at the top.'):'Turned off. Scans now show the no-longer-active page.'); });
+  const on=$('#c-on'); if(on) on.addEventListener('click',async()=>{ on.disabled=true;
+    try{ await Data.updateCode(id,{off:false,offReason:''},[{at:Date.now(),by:S.user.name,what:'Turned the code back on'}]); }catch(e){ on.disabled=false; toast(e.message||'Not turned back on. Try again.'); return; }
+    S.justMade=null; await refresh(); renderPanel();
     const s=statusOf(codeById(id)); toast(s==='expired'?'Turned on, but its end date has passed. Extend the end date to make it work again.':'Turned back on.'); });
   $('#c-savego').addEventListener('click',async()=>{
     const d={}; $$('[data-k]',body).forEach(el=>{ d[el.getAttribute('data-k')]=el.value.trim(); });
@@ -1087,8 +1242,9 @@ function wireCode(id){
       const show=v=>k==='end'&&!v?'no end date':k==='start'||k==='end'?fmtD(v):(v||'blank');
       entries.push({at:now,by:S.user.name,what:'Changed '+LABEL[k]+' from '+show(c[k])+' to '+show(nv)}); } });
     if(!entries.length){ $('#c-save').hidden=true; return; }
-    try{ await Data.updateCode(id,patch,entries); }catch(e){ toast(e.message||'Not saved. Try again.'); return; }
-    S.justMade=null; await refresh(); renderPanel(); toast(LIVE?'Saved here. Upload the codes file to make it live.':'Saved.');
+    const sg=$('#c-savego'); sg.disabled=true;
+    try{ await Data.updateCode(id,patch,entries); }catch(e){ sg.disabled=false; toast(e.message||'Not saved. Try again.'); return; }
+    S.justMade=null; await refresh(); renderPanel(); toast(LIVE?(Site.routes.ok?'Saved. Scans follow the change within about a minute.':'Saved, but the scan list didn’t update. Use Try Again at the top.'):'Saved.');
   });
 }
 
@@ -1137,14 +1293,10 @@ $('#view').addEventListener('click',e=>{
 });
 $$('.hq nav button[data-hq]').forEach(b=>b.addEventListener('click',()=>go(b.getAttribute('data-hq'))));
 async function publish(kind){
-  if(kind==='dl'){
-    try{ const f=await Site.buildFile(); await saveFile('codes.json',new Blob([JSON.stringify(f,null,2)],{type:'application/json'}));
-      toast('Downloaded codes.json. Now upload it to GitHub.'); }
-    catch(e){ toast('The download didn’t work: '+(e.message||'try again')+'.'); }
-    return;
-  }
-  try{ await Site.load(); await refresh(); render(); toast(Site.pendingCount()?'Not live yet. GitHub can take a minute or two after the upload.':'Everything is live.'); }
-  catch(e){ toast('Couldn’t check: '+(e.message||'try again')+'.'); }
+  if(kind!=='routes') return;
+  render();
+  const ok=await Site.publishRoutes(); if(ok) Site.lastRoutesAt=Date.now();
+  render(); toast(ok?'The scan list is up to date. Phones follow it within about a minute.':'Still didn’t update: '+(Site.routes.msg||'try again in a moment')+'.');
 }
 /* Scan counts come from the "QR Scans" workbook the Power Automate scan log fills.
    Download it as a CSV and load it here; it stays in this browser until replaced. */
@@ -1173,9 +1325,18 @@ async function refresh(){ S.codes=await Data.listCodes(); S.scans=await Data.lis
 async function startApp(u){
   S.user=u;
   document.body.classList.remove('bare'); $('#rail').hidden=false; $('#rail-scrim').hidden=false; $('#app').hidden=false;
+  document.body.classList.toggle('viewonly',!S.canEdit);
+  $('#view').innerHTML='<div class="note info"><b>Loading the codes…</b></div>';
   try{ if(LIVE) await Site.load(); await refresh(); }catch(e){ $('#view').innerHTML='<div class="note"><b>The codes didn’t load.</b> '+esc(e.message||'')+' Reload the page to try again.</div>'; return; }
-  const h=(location.hash||'').replace('#',''); go(['overview','codes','new','scans','scanner'].includes(h)?h:'overview');
-  if(LIVE) setInterval(async()=>{ if(document.hidden||!Site.pendingCount()) return; try{ await Site.load(); await refresh(); render(); }catch(e){} },60000);
+  const h=(location.hash||'').replace('#',''); go(['overview','codes','new','scans','scanner'].includes(h)&&(h!=='new'||S.canEdit)?h:'overview');
+  if(LIVE && Site.moved) toast('Moved '+plural(Site.moved,'code')+' into MISMO’s private storage.');
+  /* pick up colleagues' changes; never while something is being typed or edited */
+  if(LIVE) setInterval(async()=>{
+    if(document.hidden) return;
+    const busy=(S.view==='new') || ($('#c-save')&&!$('#c-save').hidden) || document.activeElement&&document.activeElement.matches&&document.activeElement.matches('input,select,textarea');
+    if(busy) return;
+    try{ if(await Site.reload()){ await refresh(); render(); if($('#panel').classList.contains('on')) renderPanel(); } await Site.checkRoutes(); }catch(e){}
+  },60000);
 }
 
 /* ── rail: collapse, remember, search (the shared MISMO pattern) ── */
@@ -1248,6 +1409,7 @@ async function startApp(u){
   RS.onChange(s=>{ if(!s) location.reload(); });
   try{ await RS.requireAccess('qr',{toolName:CONFIG.toolName,eyebrow:'Programs & Operations'}); }catch(e){ return; }
   const s=RS.current()||{};
+  try{ S.canEdit=!!RS.canEdit('qr'); }catch(e){ S.canEdit=false; }
   startApp({name:s.name||s.email||'MISMO Staff',email:s.email||''});
 })();
 })();
