@@ -367,6 +367,7 @@ body.railmini .panel.wide{width:min(1320px, calc(100vw - var(--rail-mini) - 24px
 .savebar{position:sticky;bottom:-40px;margin:22px -20px -40px;padding:12px 20px 14px;background:var(--surface);border-top:1px solid var(--border);display:flex;flex-wrap:wrap;gap:10px;align-items:center;z-index:2}
 .savebar .sp{margin-left:auto;font-size:12.3px;color:var(--ink-3)}
 .savebar .sp b{color:var(--warn)}
+.endhint b{color:var(--ink);font-weight:600}
 .hist{list-style:none;margin:0;padding:0;border:1px solid var(--border);border-radius:8px;background:var(--surface)}
 .hist li{padding:9px 14px;border-bottom:1px solid var(--rule);font-size:12.8px;display:flex;flex-wrap:wrap;gap:4px 12px}
 .hist li:last-child{border-bottom:0}
@@ -834,7 +835,7 @@ function barsHtml(arr,total,compact){
 }
 function codeRow(c,extra){
   const s=statusOf(c), n=scansFor(c.id).length;
-  const when = s==='scheduled'?'Starts '+fmtD(c.start): s==='expired'?'Ended '+fmtD(c.end): s==='off'?'Turned off':'Ends '+fmtD(c.end);
+  const when = s==='scheduled'?'Starts '+fmtD(c.start): s==='expired'?'Ended '+fmtD(c.end): s==='off'?'Turned off':(c.end?'Ends '+fmtD(c.end):'No end date');
   return '<button type="button" class="hqrow" data-open="'+esc(c.id)+'"><span class="t">'+esc(c.purpose)+
     '<small>'+esc(c.placeType)+' · '+esc(c.place)+' · For '+esc(c.forWhom)+'</small></span><span class="r">'+chip(s)+
     '<span class="d">'+(extra!=null?extra:plural(n,'scan'))+'</span><span class="d">'+esc(when)+'</span><span class="arr">›</span></span></button>';
@@ -912,7 +913,7 @@ function vCodes(){
   const t=S.text.trim().toLowerCase();
   let list=withS.filter(F[S.filter]||F.all);
   if(t) list=list.filter(x=>[x.c.id,x.c.purpose,x.c.place,x.c.placeType,x.c.forWhom,x.c.by,x.c.notes].join(' ').toLowerCase().includes(t));
-  list.sort((a,b)=>(rank[a.s]-rank[b.s])||(a.c.end<b.c.end?-1:1));
+  list.sort((a,b)=>(rank[a.s]-rank[b.s])||((a.c.end||'9999-12-31')<(b.c.end||'9999-12-31')?-1:1));
   const btns=Object.keys(names).map(k=>'<button type="button" class="fbtn" data-filter="'+k+'" aria-pressed="'+(S.filter===k||(k==='all'&&S.filter==='ended'&&false))+'">'+names[k]+'<span class="n">'+withS.filter(F[k]).length+'</span></button>').join('');
   return '<div class="vhead"><div class="grow"><h1>All Codes</h1><p>'+plural(S.codes.length,'code')+' on record. Open one to see its QR image, where it’s placed, who it’s for, its scans and its history.</p></div>'+
     '<button class="btn" type="button" data-go="new"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>New Code</button></div>'+previewBar()+
@@ -944,13 +945,14 @@ function vNew(){
   '</div></div>'+
   '<div class="formcard"><h2>How Long It Works</h2><p class="sub">Outside these dates the code shows a “no longer active” page with a link to mismo.org and '+esc(CONFIG.helpEmail)+'.</p><div class="fields">'+
     fld('start','Start Date','<input type="date" id="n-start" value="'+esc(d.start)+'">')+
-    fld('end','End Date','<input type="date" id="n-end" value="'+esc(d.end)+'"><div class="quick">'+
-      '<button type="button" class="qb" data-len="30d">30 Days</button><button type="button" class="qb" data-len="90d">90 Days</button><button type="button" class="qb" data-len="6m">6 Months</button><button type="button" class="qb" data-len="12m">1 Year</button></div>','Works through the end of this day.')+
+    '<div class="f" data-f="end"><label for="n-end">End Date</label><input type="date" id="n-end" value="'+esc(d.end)+'"><div class="quick">'+
+      '<button type="button" class="qb" data-len="30d">30 Days</button><button type="button" class="qb" data-len="90d">90 Days</button><button type="button" class="qb" data-len="6m">6 Months</button><button type="button" class="qb" data-len="12m">1 Year</button><button type="button" class="qb" data-len="none">No End Date</button></div>'+'<span class="hint endhint">'+(d.end?'Works through the end of this day.':'<b>No end date.</b> Works until someone turns it off.')+'</span>'+'<span class="err" hidden></span></div>'+
   '</div></div>'+
   '<div class="formcard"><h2>Notes</h2><div class="fields"><div class="f wide"><label for="n-notes">Notes</label><input type="text" id="n-notes" value="'+esc(d.notes)+'" placeholder="Anything else worth knowing (optional)"></div></div></div>'+
   '<div class="btnrow"><button class="btn" type="submit">Create QR Code</button><button class="btn ghost" type="button" id="n-clear">Clear the Form</button></div>'+
   '</form>'+foot();
 }
+function endHint(el){ const h=el.closest('.f').querySelector('.endhint'); if(h) h.innerHTML=el.value?'Works through the end of this day.':'<b>No end date.</b> Works until someone turns it off.'; }
 function readDraft(){ const g=k=>{ const el=$('#n-'+k); return el?el.value.trim():''; };
   return Object.assign({},S.draft,{purpose:g('purpose'),forWhom:g('forWhom'),placeType:g('placeType'),place:g('place'),dest:g('dest'),start:g('start'),end:g('end'),notes:g('notes')}); }
 function validate(d,scope){
@@ -962,8 +964,7 @@ function validate(d,scope){
   if(!d.dest) errs.dest='Add the link people should land on.';
   else { let u=d.dest; if(!/^https?:\/\//i.test(u)) u='https://'+u; const ok=safeUrl(u); if(!ok||!/\./.test(new URL(ok).hostname)) errs.dest='That doesn’t look like a web address.'; else d.dest=ok; }
   if(!d.start) errs.start='Pick a start date.';
-  if(!d.end) errs.end='Pick an end date.';
-  else if(d.start && d.end<d.start) errs.end='The end date is before the start date.';
+  if(d.end && d.start && d.end<d.start) errs.end='The end date is before the start date.';
   $$('[data-f]',scope).forEach(f=>{ const k=f.getAttribute('data-f'), e=f.querySelector('.err'); f.classList.toggle('bad',!!errs[k]); if(e){ e.hidden=!errs[k]; e.textContent=errs[k]||''; } });
   return errs;
 }
@@ -1016,7 +1017,7 @@ function codePanel(id){
   const c=codeById(id); if(!c) return '<div class="empty">That code is no longer on record.</div>';
   const T=today(), s=statusOf(c,T), sc=scansFor(id), s30=sc.filter(x=>x.at>=since(30)), url=scanUrl(id);
   let sd='';
-  if(s==='active'||s==='soon') sd='Works through <b>'+fmtD(c.end)+'</b>, '+plural(daysBetween(T,c.end),'day')+' from now.';
+  if(s==='active'||s==='soon') sd=c.end?'Works through <b>'+fmtD(c.end)+'</b>, '+plural(daysBetween(T,c.end),'day')+' from now.':'<b>No end date.</b> Works until someone turns it off.';
   if(s==='scheduled') sd='Starts working on <b>'+fmtD(c.start)+'</b>. Until then it shows the “isn’t active yet” page.';
   if(s==='expired') sd='Ended on <b>'+fmtD(c.end)+'</b>. Scans now show the “no longer active” page.';
   if(s==='off') sd='Turned off'+(c.offReason?': <b>'+esc(c.offReason)+'</b>':'')+'. Scans show the “no longer active” page.';
@@ -1046,7 +1047,7 @@ function codePanel(id){
     ed('placeType','Placement Type','select',c.placeType)+ed('place','Placement Details','text',c.place)+
     ed('dest','Destination Link','url',c.dest,'<span class="hint">Changing this sends everyone who scans to the new page. No reprint needed.</span>')+
     ed('start','Start Date','date',c.start)+
-    ed('end','End Date','date',c.end,'<div class="quick"><button type="button" class="qb" data-ext="30">+30 Days</button><button type="button" class="qb" data-ext="90">+90 Days</button><button type="button" class="qb" data-ext="365">+1 Year</button></div>')+
+    ed('end','End Date','date',c.end,'<div class="quick"><button type="button" class="qb" data-ext="30">+30 Days</button><button type="button" class="qb" data-ext="90">+90 Days</button><button type="button" class="qb" data-ext="365">+1 Year</button><button type="button" class="qb" data-ext="none">No End Date</button></div>'+'<span class="hint endhint">'+(c.end?'Works through the end of this day.':'<b>No end date.</b> Works until someone turns it off.')+'</span>')+
     ed('notes','Notes','text',c.notes)+
   '</div></div>'+
   '<div class="pblk"><h3>Scans</h3><div class="stats" style="grid-template-columns:repeat(3,minmax(0,1fr))">'+
@@ -1064,12 +1065,12 @@ function wireCode(id){
   const body=$('#panel-body');
   const changed=()=>{ let n=0; $$('[data-k]',body).forEach(el=>{ const k=el.getAttribute('data-k'), diff=el.value.trim()!==String(c[k]||''); el.closest('.f').classList.toggle('edited',diff); if(diff) n++; });
     $('#c-save').hidden=!n; $('#c-n').textContent=n; };
-  body.addEventListener('input',e=>{ if(e.target.matches('[data-k]')) changed(); });
+  body.addEventListener('input',e=>{ if(e.target.matches('[data-k]')){ if(e.target.id==='e-end') endHint(e.target); changed(); } });
   body.addEventListener('change',e=>{ if(e.target.matches('[data-k]')) changed(); });
-  $$('[data-ext]',body).forEach(b=>b.addEventListener('click',()=>{ const el=$('#e-end'), base=(el.value&&el.value>today())?el.value:today(); el.value=addDays(base,+b.getAttribute('data-ext')); changed(); }));
+  $$('[data-ext]',body).forEach(b=>b.addEventListener('click',()=>{ const el=$('#e-end'), x=b.getAttribute('data-ext'), base=(el.value&&el.value>today())?el.value:today(); el.value=x==='none'?'':addDays(base,+x); endHint(el); changed(); }));
   $$('[data-dl]',body).forEach(b=>b.addEventListener('click',()=>download(c,b.getAttribute('data-dl'))));
   $('#c-copy').addEventListener('click',e=>copyText(scanUrl(id),e.currentTarget));
-  $('#c-copyplace').addEventListener('click',()=>{ S.draft=Object.assign(blankDraft(),{purpose:c.purpose,forWhom:c.forWhom,dest:c.dest,end:c.end>today()?c.end:addMonths(today(),3),from:c.id+' · '+c.place}); closePanel(); go('new'); setTimeout(()=>{ const p=$('#n-placeType'); if(p) p.focus(); },30); });
+  $('#c-copyplace').addEventListener('click',()=>{ S.draft=Object.assign(blankDraft(),{purpose:c.purpose,forWhom:c.forWhom,dest:c.dest,end:!c.end?'':(c.end>today()?c.end:addMonths(today(),3)),from:c.id+' · '+c.place}); closePanel(); go('new'); setTimeout(()=>{ const p=$('#n-placeType'); if(p) p.focus(); },30); });
   $('#c-undo').addEventListener('click',()=>renderPanel());
   const off=$('#c-off'); if(off) off.addEventListener('click',()=>{ $('#c-offbox').hidden=false; $('#c-reason').focus(); });
   const offno=$('#c-offno'); if(offno) offno.addEventListener('click',()=>{ $('#c-offbox').hidden=true; });
@@ -1083,7 +1084,7 @@ function wireCode(id){
     if(Object.keys(errs).length) return;
     const patch={}, entries=[], now=Date.now();
     Object.keys(d).forEach(k=>{ const nv=k==='dest'?probe.dest:d[k]; if(nv!==String(c[k]||'')){ patch[k]=nv;
-      const show=v=>k==='start'||k==='end'?fmtD(v):(v||'blank');
+      const show=v=>k==='end'&&!v?'no end date':k==='start'||k==='end'?fmtD(v):(v||'blank');
       entries.push({at:now,by:S.user.name,what:'Changed '+LABEL[k]+' from '+show(c[k])+' to '+show(nv)}); } });
     if(!entries.length){ $('#c-save').hidden=true; return; }
     try{ await Data.updateCode(id,patch,entries); }catch(e){ toast(e.message||'Not saved. Try again.'); return; }
@@ -1121,7 +1122,8 @@ function render(){
   if(S.view==='new'){ const f=$('#newform');
     f.addEventListener('submit',e=>{ e.preventDefault(); createFromForm(); });
     $$('[data-len]',f).forEach(b=>b.addEventListener('click',()=>{ const st=$('#n-start').value||today(), L=b.getAttribute('data-len');
-      $('#n-end').value=L.endsWith('d')?addDays(st,parseInt(L,10)):addMonths(st,parseInt(L,10)); }));
+      const el=$('#n-end'); el.value=L==='none'?'':L.endsWith('d')?addDays(st,parseInt(L,10)):addMonths(st,parseInt(L,10)); endHint(el); }));
+    $('#n-end').addEventListener('input',e=>endHint(e.target));
     $('#n-clear').addEventListener('click',()=>{ S.draft=blankDraft(); render(); }); }
 }
 $('#view').addEventListener('click',e=>{
