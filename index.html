@@ -560,7 +560,7 @@ const CONFIG = {
   toolName: "the QR Code Manager",
   // The Power Automate "QR Scan Log" flow's HTTP address, and the word it checks for.
   // Public by design, like the prospectus intake: the worst misuse is a junk scan row.
-  scanLogUrl: "",
+  scanLogUrl: "https://default867e5d11bde4499fb45e61572f9f33.7c.environment.api.powerplatform.com:443/powerautomate/automations/direct/cu/24/workflows/ce861223d30c4a2f888692e451e4c593/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=OgRAqtYlunWaniFXIoQfl-zSGc4mFr_W7ralQXUu9mw",
   scanLogSecret: "mismo-qr-scan",
   helpEmail: "info@mismo.org",
   fallbackSite: "https://www.mismo.org",
@@ -1151,7 +1151,7 @@ function vScans(){
   const rows=list.slice(0,25).map(s=>{ const k=c(s.code); return '<tr class="clk" data-open="'+esc(s.code)+'"><td class="nw">'+esc(fmtDT(s.at))+'</td><td>'+esc(k.purpose||s.code)+'</td><td>'+esc(k.place||'')+'</td><td class="nw">'+esc(s.device)+'</td><td class="nw">'+esc(s.region)+'</td><td class="nw">'+
     (s.outcome==='sent'?'Sent to link':s.outcome==='early'?'Not started page':'No longer active page')+'</td></tr>'; }).join('');
   return '<div class="vhead"><div class="grow"><h1>Scan Activity</h1><p>'+plural(tot,'scan')+' in '+lab+', from '+plural(codesHit,'code')+'.</p></div><div class="seg" role="group" aria-label="Period">'+seg+'</div></div>'+previewBar()+
-  (LIVE?'<div class="note info">'+(CONFIG.scanLogUrl?'<b>Scans are counted automatically.</b> New scans show up here within about 15 minutes.':'<b>Scan counting isn’t switched on yet.</b> Scans will show up here once the QR Scan Log flow is connected.')+'</div>':'')+'<div class="stats"><div class="stat"><span class="lab">Total Scans</span><span class="val">'+num(tot)+'</span><span class="sub">'+esc(lab.charAt(0).toUpperCase()+lab.slice(1))+'</span></div>'+
+  (LIVE?'<div class="note info">'+(CONFIG.scanLogUrl?'<b>Scans are counted automatically.</b> A new scan is saved within a few seconds and shows up here the next time the page loads.':'<b>Scan counting isn’t switched on yet.</b> Scans will show up here once the QR Scan Log flow is connected.')+'</div>':'')+'<div class="stats"><div class="stat"><span class="lab">Total Scans</span><span class="val">'+num(tot)+'</span><span class="sub">'+esc(lab.charAt(0).toUpperCase()+lab.slice(1))+'</span></div>'+
     '<div class="stat"><span class="lab">Sent to Their Link</span><span class="val">'+num(sent)+'</span><span class="sub">'+pct(sent,tot)+'% of scans</span></div>'+
     '<div class="stat'+(dead?' warn':'')+'"><span class="lab">Reached an Ended Code</span><span class="val">'+num(dead)+'</span><span class="sub">Saw the no-longer-active page</span></div>'+
     '<div class="stat"><span class="lab">Codes Scanned</span><span class="val">'+num(codesHit)+'</span><span class="sub">of '+num(S.codes.length)+' on record</span></div></div>'+
